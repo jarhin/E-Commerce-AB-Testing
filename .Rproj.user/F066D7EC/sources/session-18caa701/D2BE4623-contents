@@ -1,0 +1,449 @@
+---
+title: "E-Commerce A/B Test"
+author: "John Arhin"
+format: 
+  html:
+    toc: true
+    toc-location: right
+  
+---
+
+## Libraries
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+library(readr)
+library(here)
+library(dplyr)
+library(magrittr)
+library(lubridate)
+library(forcats)
+
+library(infer)
+library(rstatix)
+library(tidyr)
+library(broom)
+
+# visuals
+library(ggplot2)
+library(scales)
+# library(ggmosaic)
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide', include=FALSE}
+# set path
+here()
+
+options(dplyr.summarise.inform = FALSE)
+```
+
+
+## Data 
+
+We download the data from an e-commerce site.
+
+### Columns
+
+#### User Data
+
+We first look at the site data
+
+| Column | Column-Type | Description |
+|:------:|:-----------:|:------------|
+| id | integer | User Identifier |
+| time | time | HH:MM (hours and minutes) |
+| con_treat | character | Values "control" and "treatment" for the control and treatment groups respectively |
+| page | character | Values "old_page" and "new_page" for old and new pages |
+| converted | double | Values 0 and 1 for not converted and converted respectively |
+
+#### User Country Data
+
+We then look at the country data
+
+| Column | Column-Type | Description |
+|:------:|:-----------:|:------------|
+| id | integer | User Identifier |
+| country | character | Values "UK","US" and "CA" for the United Kingdom, United States of America and Canada respectively |
+
+
+## Data Loading
+
+```{r}
+ab_test_data = read_csv(
+  here("Data", "ab_test.csv"),
+  col_types = cols(
+    id = col_integer(),
+    time = col_time(),
+    con_treat = col_character(),
+    page = col_character(),
+    converted = col_double()
+  )
+)
+
+head(ab_test_data)
+```
+
+```{r}
+countries_ab = read_csv(
+  here("Data", "countries_ab.csv"),
+  col_types = cols(
+    id = col_integer(),
+    country = col_character()
+  )
+)
+
+head(countries_ab)
+```
+
+## Data Munging
+
+We (left) join the A/B dataset together with the countries information on the column `id`. We then convert the time to seconds to investigate later. We also create another column, called `conversion_factor` of type factor, that transforms the binary values of the `conversion` column into the values "Yes" and "No".
+
+```{r}
+ab_merged <- ab_test_data %>% 
+  left_join(
+    countries_ab,
+    by = "id"
+  ) %>% 
+  mutate(
+    time_period = hms(time),
+    time_seconds = period_to_seconds(time_period),
+    con_treat = parse_factor(con_treat, levels = c("control", "treatment"), ordered = FALSE),
+    page = parse_factor(
+      page, 
+      levels = c("new_page", "old_page"), 
+      ordered = FALSE
+    ),
+    conversion_factor = converted %>% 
+      as.character(.) %>% 
+      parse_factor(
+        ., 
+        levels = c("0", "1"), 
+        ordered = TRUE
+      ) %>% 
+      fct_recode(
+        ., 
+        "No" = "0", 
+        "Yes" = "1"
+      ),
+  ) 
+  
+
+head(ab_merged)
+```
+
+# Counts
+
+```{r}
+ab_merged %>% 
+  count(page, con_treat, conversion_factor)
+```
+
+
+```{r}
+ab_merged %>% 
+  ggplot(aes(x = page, fill = conversion_factor)) +
+  geom_bar() + 
+  facet_grid(vars(con_treat)) +
+  guides(fill = guide_legend(title = "Conversion"))
+```
+
+
+### New Groups {#sec-new-groups}
+
+We use this plot to motivate the following two groups:
+
+1. Control Group: `con_treat` equals `control` AND `page` equals `old_page`
+2. Treatment Group: `con_treat` equals `treatment` AND `page` equals `new_page`
+
+We filter out all the other data which is not in the control nor treatment group as defined above.
+
+
+```{r}
+ab_merged_new_groups <- ab_merged %>% 
+  mutate(
+    new_groups = case_when(
+      con_treat == "control" & page == "old_page" ~ "Control",
+      con_treat == "treatment" & page == "new_page" ~ "Treatment",
+      .default = "Other"
+    )
+  ) %>% 
+  filter(new_groups != "Other") %>% 
+  mutate(
+    new_groups = parse_factor(new_groups, levels = c("Control", "Treatment"), ordered = FALSE)
+  )
+```
+
+We plot the count of users per new group (as defined in @sec-new-groups) by country.
+
+```{r}
+ab_merged_new_groups %>% 
+  count(country, new_groups)
+```
+
+
+```{r}
+ab_merged_new_groups %>% 
+  ggplot(aes(x = new_groups, fill = conversion_factor)) +
+  geom_bar() + 
+  facet_grid(.~country) +
+  guides(fill = guide_legend(title = "Conversion")) + 
+  ggtitle("Count of Users Per New Group By Country") + 
+  scale_y_continuous("Count\n", labels = comma) + 
+  scale_x_discrete("\nGroup")
+```
+
+We can see that the vast majority of users (i.e over 10, 000 for the New Groups for Control and Treatment) are from the USA, while Canada seems to have the fewest number of users with under 10,000.
+
+
+# Plots
+
+```{r}
+proportion_group <- ab_merged_new_groups %>% 
+  group_by(new_groups, conversion_factor) %>% 
+  summarise(
+    number_id = n_distinct(id)
+  ) %>% 
+  mutate(conversion_factor_proportion = number_id / sum(number_id)) %>%
+  ungroup() 
+
+proportion_group
+```
+
+
+```{r}
+proportion_group %>%
+  ggplot(aes(x = conversion_factor, y = conversion_factor_proportion)) +
+  geom_col() + 
+  scale_y_continuous(name = "Proportion\n", labels = percent) +
+  scale_x_discrete("\nConversion") + 
+  ggtitle("Proportion of Users who make conversion") +
+  facet_grid(cols = vars(new_groups))
+```
+
+We can see that the proportion of conversions is about 12% for each new group as defined in @sec-new-groups.
+
+
+```{r}
+ab_merged_new_groups %>% 
+  count(new_groups, conversion_factor)
+```
+
+
+
+```{r}
+ab_merged_new_groups %>% 
+  ggplot(aes(x = new_groups, fill = conversion_factor)) +
+  geom_bar() + 
+  scale_y_continuous(name = "Count\n", labels = comma) +
+  scale_x_discrete("\nGroup") + 
+  ggtitle("Count of Users who make conversions") +
+  guides(fill = guide_legend(title = "Conversion"))
+```
+
+## Plot By Country
+
+
+```{r}
+cross_tab_counts <- ab_merged_new_groups %>% 
+  group_by(new_groups, country, conversion_factor) %>% 
+  summarise(
+    number_id = n_distinct(id)
+  ) %>% 
+  mutate(conversion_factor_proportion = number_id / sum(number_id)) %>%
+  ungroup()
+
+cross_tab_counts
+```
+
+```{r}
+cross_tab_counts %>%
+  ggplot(aes(x = conversion_factor, y = conversion_factor_proportion)) +
+  geom_col() +
+  facet_grid(country ~ new_groups) + 
+  scale_y_continuous("Proportion\n", labels = percent) + 
+  scale_x_discrete("\nConversion") + 
+  ggtitle("Proportion of Conversions Per Group By Country")
+```
+
+We can see that the proportion of users with conversions remains pretty constant at just over 10%.
+
+# Statistical Tests
+
+## Chi-Squared Test
+
+```{r}
+conversion_page_tab <- table(ab_merged_new_groups$new_groups, ab_merged_new_groups$conversion_factor)
+conversion_page_tab
+```
+
+
+```{r}
+chi_test_conversion <- chisq.test(conversion_page_tab)
+
+chi_test_conversion
+```
+
+Since `r chi_test_conversion$p.value` is greater than 0.05, we do not have enough evidence to say that there is an association between conversion and the new groups as defined in @sec-new-groups.
+
+## T-Test
+
+```{r}
+ab_merged_new_groups %>% 
+  dplyr::select(new_groups, time_seconds) %>% 
+  slice_head(n=6)
+```
+
+
+```{r}
+control_group <- ab_merged_new_groups$time_seconds[ab_merged_new_groups$new_groups == "Control"]
+treatment_group <- ab_merged_new_groups$time_seconds[ab_merged_new_groups$new_groups == "Treatment"]
+
+t_test_new_groups <- t.test(control_group, treatment_group)
+
+t_test_new_groups
+```
+
+The p-value of `r t_test_new_groups$p.value`, which is clearly bigger than 0.05, means that we cannot reject the hypothesis that there is a difference in the mean time spent on the web-page between the control group and the treatment group.
+
+# Infer
+
+## Conversions
+
+### Hypothesis Test 
+
+```{r}
+set.seed(1234)
+group_order <- c("Control", "Treatment")
+
+null_hypothesis_new_grouped <- ab_merged_new_groups %>% 
+  specify(conversion_factor ~ new_groups, success = "Yes") %>% 
+  hypothesise(null = "independence") %>%
+  generate(reps = 500, type = "permute") %>%
+  calculate(stat = "diff in props", order = group_order)
+
+null_hypothesis_new_grouped
+```
+
+```{r}
+obs_diff_prop_new_grouped <- ab_merged_new_groups %>% 
+  specify(conversion_factor ~ new_groups, success = "Yes") %>% 
+  calculate(stat = "diff in props", order = group_order)
+
+obs_diff_prop_new_grouped
+```
+
+
+
+
+```{r}
+visualize(null_hypothesis_new_grouped) + 
+  shade_p_value(obs_stat = obs_diff_prop_new_grouped, direction = "right")
+```
+
+```{r}
+null_hypothesis_new_grouped %>% 
+  get_p_value(obs_stat = obs_diff_prop_new_grouped, direction = "right")
+```
+
+
+### Confidence Intervals
+
+```{r}
+set.seed(1234)
+
+bootstrapped_new_grouped <- ab_merged_new_groups %>% 
+  specify(conversion_factor ~ new_groups, success = "Yes") %>% 
+  generate(reps = 500, type = "bootstrap") %>%
+  calculate(stat = "diff in props", order = group_order)
+
+head(bootstrapped_new_grouped)
+```
+
+```{r}
+percentile_ci_new_grouped <- bootstrapped_new_grouped %>% 
+  get_confidence_interval(level = 0.95, type = "percentile")
+percentile_ci_new_grouped
+```
+
+```{r}
+visualize(bootstrapped_new_grouped) + 
+  shade_confidence_interval(endpoints = percentile_ci_new_grouped)
+```
+
+```{r}
+se_ci_new_grouped <- bootstrapped_new_grouped %>% 
+  get_confidence_interval(level = 0.95, type = "se", 
+                          point_estimate = obs_diff_prop_new_grouped)
+se_ci_new_grouped
+```
+
+```{r}
+visualize(bootstrapped_new_grouped) + 
+  shade_confidence_interval(endpoints = se_ci_new_grouped)
+```
+
+## Seconds
+
+### Hypothesis Tests
+
+```{r}
+set.seed(1234)
+
+null_hypothesis_time <- ab_merged_new_groups %>% 
+  specify(time_seconds ~ new_groups) %>% 
+  hypothesise(null = "independence") %>%
+  generate(reps = 500, type = "permute") %>%
+  calculate(stat = "diff in means", order = group_order)
+
+head(null_hypothesis_time)
+```
+```{r}
+obs_diff_prop_mean_time <- ab_merged_new_groups %>% 
+  specify(time_seconds ~ new_groups) %>% 
+  calculate(stat = "diff in means", order = group_order)
+
+obs_diff_prop_mean_time
+```
+
+```{r}
+null_hypothesis_time_t_test <- ab_merged_new_groups %>% 
+  specify(time_seconds ~ new_groups) %>% 
+  hypothesise(null = "independence") %>%
+  generate(reps = 500, type = "permute") %>%
+  calculate(stat = "t", order = group_order)
+
+head(null_hypothesis_time_t_test)
+```
+
+
+
+```{r}
+obs_diff_prop_mean_time_t_test <- ab_merged_new_groups %>% 
+  specify(time_seconds ~ new_groups) %>% 
+  calculate(stat = "t", order = group_order)
+
+obs_diff_prop_mean_time_t_test
+```
+
+
+```{r}
+visualize(null_hypothesis_time, bins = 10) + 
+  shade_p_value(obs_stat = obs_diff_prop_mean_time, direction = "both")
+```
+
+```{r}
+visualize(null_hypothesis_time_t_test, method = "both") +
+  shade_p_value(obs_stat = obs_diff_prop_mean_time_t_test, direction = "both")
+```
+
+```{r}
+null_hypothesis_time %>% 
+  get_p_value(obs_stat = obs_diff_prop_mean_time, direction = "both")
+```
+
+
+```{r}
+null_hypothesis_time_t_test %>% 
+  get_p_value(obs_stat = obs_diff_prop_mean_time_t_test, direction = "both")
+```
+
